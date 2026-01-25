@@ -1,0 +1,13 @@
+.*
+!.gitignore
+
+*.json
+*.log
+
+build/
+data-dir-*/
+tmp/
+
+GPATH
+GRTAGS
+GTAGS
