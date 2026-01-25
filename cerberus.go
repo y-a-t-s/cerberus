@@ -13,14 +13,14 @@ import (
 type Challenge struct {
 	Salt  string // Challenge salt from server.
 	Diff  uint32 // Difficulty level.
-	Steps uint32 // Time limit for answer in minutes.
+	Steps uint32 // Not 100% sure how this is used yet.
 	host  *url.URL
 }
 
 type Solution struct {
 	Salt     string
 	Nonce    uint32
-	Redirect string
+	Redirect string // To be set manually by caller.
 
 	Hash []byte
 	host *url.URL
@@ -32,7 +32,6 @@ func genHashes(ctx context.Context, c Challenge) <-chan Solution {
 		out      = make(chan Solution, 1)
 		sha      = sha256.New()
 		nonce    = rand.Uint32()
-		redirect = "/" // TODO: figure out non-homepage redirects.
 	)
 
 	go func() {
@@ -50,7 +49,7 @@ func genHashes(ctx context.Context, c Challenge) <-chan Solution {
 			sol := Solution{
 				Salt:     c.Salt,
 				Nonce:    nonce,
-				Redirect: redirect,
+				Redirect: "/", // Use sensible default for placeholder.
 				Hash:     sha.Sum(nil),
 			}
 			// Ensure we don't hang if out channel is full on ctx close.
