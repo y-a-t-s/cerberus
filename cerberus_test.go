@@ -32,7 +32,7 @@ func solveTest(ctx context.Context, hc http.Client, host string) error {
 	}
 
 	log.Printf("Fetching new %s challenge...", connType)
-	c, err := NewChallenge(hc, host)
+	c, err := NewChallenge(ctx, hc, host)
 	if err != nil {
 		return err
 	}
@@ -42,13 +42,15 @@ func solveTest(ctx context.Context, hc http.Client, host string) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("Solution hash: %x, nonce: %d\n", s.Hash, s.Nonce)
+	log.Printf("Solution hash: %x, nonce: %d, remaining steps: %d\n", s.Hash, s.Nonce, s.Steps)
 
-	a, err := Submit(hc, s)
+	resp, err := Submit(ctx, hc, s, "")
 	if err != nil {
 		return err
 	}
-	log.Printf("Response: %s\n\n", a)
+	defer resp.Body.Close()
+
+	log.Printf("Response: %s\n\n", resp.Header.Get("Set-Cookie"))
 
 	return nil
 }
@@ -65,17 +67,13 @@ func newProxyTransport() *http.Transport {
 func TestSubmit(t *testing.T) {
 	ctx := t.Context()
 
-	hc := http.Client{}
-
-	err := solveTest(ctx, hc, _TEST_HOST)
+	err := solveTest(ctx, http.Client{}, _TEST_HOST)
 	if err != nil {
 		t.Error(err)
 	}
 
-	hc.Transport = newProxyTransport()
-
 	var dnsErr *net.DNSError
-	err = solveTest(ctx, hc, _TEST_ONION)
+	err = solveTest(ctx, http.Client{Transport: newProxyTransport()}, _TEST_ONION)
 	if err != nil {
 		if errors.As(err, &dnsErr) {
 			log.Println("Unable to resolve .onion domain. Make sure ALL_PROXY is set and tor is running.")

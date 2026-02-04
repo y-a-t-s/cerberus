@@ -2,7 +2,7 @@
 
 A fast [Tartarus](https://usips.org/products/tartarus/) solver lib.
 
-For technical details, you can try asking Josh (not me) or reverse engineer the *wonderful* solver solutions offered on Tartarus' no-js page. Good luck.
+For technical details, you can try asking Josh (not me) or reverse engineer the solver solutions offered on Tartarus' no-js page. Good luck.
 
 <hr>
 

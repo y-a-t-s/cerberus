@@ -1,6 +1,7 @@
 package cerberus
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -18,7 +19,16 @@ var (
 	ErrParseFailed = errors.New("Failed to parse challenge from HTML data tags.")
 )
 
-func NewChallenge(hc http.Client, host string) (Challenge, error) {
+type ErrInvalidSolution struct {
+	s Solution
+}
+
+func (e *ErrInvalidSolution) Error() string {
+	return fmt.Sprintf("Received 400 status when submitting solution: %+v", e.s)
+}
+
+// Request new Tartarus challenge from provided host.
+func NewChallenge(ctx context.Context, hc http.Client, host string) (Challenge, error) {
 	u, err := parseHost(host)
 	if err != nil {
 		return Challenge{}, err
@@ -34,13 +44,18 @@ func NewChallenge(hc http.Client, host string) (Challenge, error) {
 		return nil
 	}
 
-	resp, err := hc.Get(u.String())
+	req, err := http.NewRequestWithContext(ctx, "GET", u.String(), nil)
+	if err != nil {
+		return Challenge{}, err
+	}
+
+	resp, err := hc.Do(req)
 	if err != nil {
 		return Challenge{}, err
 	}
 	defer resp.Body.Close()
 
-	// Check for 203 status
+	// Check for 203 status. A 203 indicates a redirect to a challenge page.
 	if resp.StatusCode != 203 {
 		return Challenge{}, ErrNoRedirect
 	}
@@ -55,28 +70,39 @@ func NewChallenge(hc http.Client, host string) (Challenge, error) {
 	return c, nil
 }
 
-func Submit(hc http.Client, s Solution) (string, error) {
-	resp, err := postSolution(hc, s)
-	if err != nil {
-		return "", err
+// Submit a Solution for a Challenge.
+//
+// If redirect is empty, "/" is used as a sensible default.
+// Auth cookies get set automatically in http.Client's CookieJar.
+// The *http.Response is provided to support more advanced setups. The auth token can also be found in its Body.
+func Submit(ctx context.Context, hc http.Client, s Solution, redirect string) (*http.Response, error) {
+	if redirect != "" {
+		s.Redirect = redirect
 	}
-	defer resp.Body.Close()
 
-	return resp.Header.Get("Set-Cookie"), nil
-}
-
-func postSolution(hc http.Client, s Solution) (*http.Response, error) {
-	// Ensure the POST url parses properly before passing the string.
-	u, err := url.Parse(fmt.Sprintf("%s://%s/.ttrs/challenge", s.host.Scheme, s.host.Hostname()))
+	resp, err := postSolution(ctx, hc, s)
 	if err != nil {
 		return nil, err
 	}
 
-	return hc.PostForm(u.String(), url.Values{
-		"salt":     []string{s.Salt},
-		"redirect": []string{s.Redirect},
-		"nonce":    []string{fmt.Sprint(s.Nonce)},
-	})
+	if s.Steps > 0 {
+		c, err := NewChallenge(ctx, hc, s.host.String())
+		if err != nil {
+			return nil, err
+		}
+
+		// maybe useful later. idk.
+		// c.Steps = s.Steps
+
+		s, err := Solve(ctx, c)
+		if err != nil {
+			return nil, err
+		}
+
+		return Submit(ctx, hc, s, redirect)
+	}
+
+	return resp, nil
 }
 
 func parseHost(addr string) (*url.URL, error) {
@@ -85,12 +111,35 @@ func parseHost(addr string) (*url.URL, error) {
 		addr = "https://" + addr
 	}
 
-	u, err := url.Parse(addr)
+	return url.Parse(addr)
+}
+
+func postSolution(ctx context.Context, hc http.Client, s Solution) (*http.Response, error) {
+	// Ensure the POST url parses properly before passing the string.
+	u, err := url.Parse(fmt.Sprintf("%s://%s/.ttrs/challenge", s.host.Scheme, s.host.Hostname()))
 	if err != nil {
 		return nil, err
 	}
 
-	return u, nil
+	reqBody := strings.NewReader(fmt.Sprintf(`salt=%s&redirect=%s&nonce=%d`, s.Salt, url.PathEscape(s.Redirect), s.Nonce))
+	req, err := http.NewRequestWithContext(ctx, "POST", u.String(), reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// TODO: Additionally verify failure from response JSON. Maybe include resp body in err type.
+	// Rejected solution response: status=400 body={"success":false,"reason":"invalid_solution","action":"retry"}
+	if resp.StatusCode == 400 {
+		defer resp.Body.Close()
+		return nil, &ErrInvalidSolution{s}
+	}
+
+	return resp, nil
 }
 
 func parseTags(r io.Reader) (Challenge, error) {
@@ -115,7 +164,7 @@ func parseTags(r io.Reader) (Challenge, error) {
 					if err != nil {
 						return c, ErrParseFailed
 					}
-					c.Steps = uint32(steps)
+					c.Steps = int8(steps)
 				}
 			}
 		}

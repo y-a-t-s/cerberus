@@ -13,63 +13,35 @@ import (
 type Challenge struct {
 	Salt  string // Challenge salt from server.
 	Diff  uint32 // Difficulty level.
-	Steps uint32 // Not 100% sure how this is used yet.
-	host  *url.URL
-}
+	Steps int8   // Each step consists of a Challenge and a Solution. More than 1 may be required.
+	// Stored as a signed int to get past underflow issues later on.
 
-type Solution struct {
-	Salt     string
-	Nonce    uint32
-	Redirect string // To be set manually by caller.
-
-	Hash []byte
 	host *url.URL
 }
 
-// Brute force nonces until a valid solution is found.
-func genHashes(ctx context.Context, c Challenge) <-chan Solution {
-	var (
-		out      = make(chan Solution, 1)
-		sha      = sha256.New()
-		nonce    = rand.Uint32()
-	)
+// Convenience wrapper, equivalent to Solve(ctx, c).
+func (c Challenge) Solve(ctx context.Context) (Solution, error) {
+	return Solve(ctx, c)
+}
 
-	go func() {
-		defer close(out)
+type Solution struct {
+	Hash     []byte // Not required in POST, but provided for reference.
+	Salt     string // Challenge salt.
+	Nonce    uint32 // Solution nonce. This is the "answer" to the problem.
+	Redirect string // Relative path to redirect to after Solution is accepted.
 
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
+	Steps int8 // Steps, as described in Challenge.
 
-			sha.Write(fmt.Append(nil, c.Salt, nonce))
+	// TODO: Maybe make the redirect shit auto, idk.
 
-			sol := Solution{
-				Salt:     c.Salt,
-				Nonce:    nonce,
-				Redirect: "/", // Use sensible default for placeholder.
-				Hash:     sha.Sum(nil),
-			}
-			// Ensure we don't hang if out channel is full on ctx close.
-			select {
-			case <-ctx.Done():
-				return
-			case out <- sol:
-			}
-
-			// Reset hasher input for next iteration.
-			sha.Reset()
-			nonce++
-		}
-	}()
-
-	return out
+	host *url.URL
 }
 
 // Given difficulty is measured in number of leading 0 bits.
 func checkZeros(diff uint32, hash []byte) bool {
+	// I am using this big ugly check to avoid needing to hardcode the max difficulty (32, by the looks of it).
+	// Otherwise, it's a simple < comparison to (1 << (32 - diff))
+
 	var (
 		rem    = diff % 8         // Remainder after dividing diff (given in bits) to bytes.
 		nbytes = (diff - rem) / 8 // Amount of 0x0 bytes we can divide difficulty bits into.
@@ -77,9 +49,8 @@ func checkZeros(diff uint32, hash []byte) bool {
 		mask uint8 // Mask to check remaining bits.
 	)
 
-	lh := uint32(len(hash))
 	// Check bounds for the loops found below.
-	if lh < nbytes || (rem > 0 && lh < nbytes+1) {
+	if lh := uint32(len(hash)); lh < nbytes || (rem > 0 && lh < nbytes+1) {
 		return false
 	}
 
@@ -106,28 +77,76 @@ func checkZeros(diff uint32, hash []byte) bool {
 	return hash[nbytes]&mask == 0x0
 }
 
+// Brute force nonces until a valid solution is found.
+func genHashes(ctx context.Context, c Challenge) <-chan Solution {
+	var (
+		out   = make(chan Solution, 1) // Probably unnecessary buffering for questionable efficiency.
+		sha   = sha256.New()
+		nonce = rand.Uint32()
+	)
+
+	go func() {
+		defer close(out)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			sha.Write(fmt.Append(nil, c.Salt, nonce))
+
+			sol := Solution{
+				Hash:     sha.Sum(nil),
+				Salt:     c.Salt,
+				Nonce:    nonce,
+				Redirect: "/", // Use sensible default for placeholder, for now.
+				Steps:    c.Steps - 1,
+			}
+			// Ensure we don't hang if out channel is full on ctx close.
+			select {
+			case <-ctx.Done():
+				return
+			case out <- sol:
+			}
+
+			// Reset hasher input for next iteration.
+			sha.Reset()
+			nonce++
+		}
+	}()
+
+	return out
+}
+
 // Solve Challenge c. Returns Solution that can be submitted.
 func Solve(ctx context.Context, c Challenge) (Solution, error) {
 	sol := make(chan Solution, 1)
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	worker := func() {
+		hf := genHashes(ctx, c)
+		// Loop until answer has been found.
+		// Should break when hash worker terminates.
+		for h := range hf {
+			if checkZeros(c.Diff, h.Hash) {
+				h.Salt = c.Salt
+				// Set host url to submit this to.
+				h.host = c.host
+				sol <- h
+			}
+		}
+	}
 
 	go func() {
 		// A reasonable hardware-based job limiter.
 		// Use 1 worker per thread at most.
 		threads := runtime.NumCPU()
-		for i := 0; i < threads; i++ {
-			go func() {
-				hf := genHashes(ctx, c)
-				// Loop until answer has been found.
-				// Should break when hash worker terminates.
-				for h := range hf {
-					if checkZeros(c.Diff, h.Hash) {
-						h.Salt = c.Salt
-						// Set host url to submit this to.
-						h.host = c.host
-						sol <- h
-					}
-				}
-			}()
+		for range threads {
+			go worker()
 		}
 	}()
 
