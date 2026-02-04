@@ -42,7 +42,7 @@ func solveTest(ctx context.Context, hc http.Client, host string) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("Solution hash: %x, nonce: %d, remaining steps: %d\n", s.Hash, s.Nonce, s.Steps)
+	log.Printf("Solution hash: %x, nonce: %d\n", s.Hash, s.Nonce)
 
 	resp, err := Submit(ctx, hc, s, "")
 	if err != nil {

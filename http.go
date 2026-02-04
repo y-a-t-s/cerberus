@@ -85,21 +85,23 @@ func Submit(ctx context.Context, hc http.Client, s Solution, redirect string) (*
 		return nil, err
 	}
 
-	if s.Steps > 0 {
+	// This feels gross, but it works.
+	for s.Steps > 0 {
+		resp.Body.Close()
+
 		c, err := NewChallenge(ctx, hc, s.host.String())
 		if err != nil {
 			return nil, err
 		}
 
-		// maybe useful later. idk.
-		// c.Steps = s.Steps
-
-		s, err := Solve(ctx, c)
+		s, err = Solve(ctx, c)
 		if err != nil {
 			return nil, err
 		}
-
-		return Submit(ctx, hc, s, redirect)
+		resp, err = Submit(ctx, hc, s, redirect)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return resp, nil
